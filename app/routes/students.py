@@ -5,7 +5,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.extensions import db
-from app.models import Course, Enrollment, Lesson, LessonProgress, Module
+from app.models import AttendanceRecord, AttendanceSession, CodexStudentID, Course, Enrollment, Lesson, LessonProgress, Module
 from app.models.user import utc_now
 from app.responses import error_response, success_response
 from app.routes.helpers import json_body, parse_non_negative_int
@@ -61,6 +61,13 @@ def create_enrollment():
     ).first()
     if existing:
         return error_response("You are already enrolled in this course", "ENROLLMENT_EXISTS", 409)
+
+    if float(course.price or 0) > 0:
+        return error_response(
+            "Paid courses must be purchased through the payment flow",
+            "PAYMENT_REQUIRED",
+            402,
+        )
 
     enrollment = Enrollment(student_id=current_user().id, course_id=course.id, status="active")
     db.session.add(enrollment)
@@ -323,5 +330,116 @@ def course_learning(course_id: int):
             "enrollment": enrollment.to_dict(),
             "modules": modules,
             "progress": progress,
+        },
+    )
+
+
+@students_bp.get("/student/codex-id")
+@student_required
+def student_codex_id():
+    """Get own Codex Student ID and QR information."""
+    student_id = CodexStudentID.query.filter_by(user_id=current_user().id).first()
+    if not student_id:
+        return error_response("Codex Student ID not issued", "CODEX_ID_NOT_ISSUED", 404)
+    
+    # Get most recent enrollment for academic data
+    enrollment = (
+        Enrollment.query.options(joinedload(Enrollment.course))
+        .filter_by(student_id=current_user().id)
+        .filter(Enrollment.status.in_(("active", "completed")))
+        .order_by(Enrollment.enrolled_at.desc())
+        .first()
+    )
+    
+    enrollment_data = None
+    if enrollment and enrollment.course:
+        enrollment_data = {
+            "course_title": enrollment.course.title,
+            "enrolled_at": enrollment.enrolled_at.isoformat() if enrollment.enrolled_at else None,
+        }
+    
+    response_data = student_id.to_dict(include_user=True, include_qr=True)
+    response_data["enrollment"] = enrollment_data
+    
+    return success_response(
+        "Codex Student ID retrieved",
+        {"codex_id": response_data},
+    )
+
+
+@students_bp.get("/student/attendance")
+@student_required
+def student_attendance():
+    """Get own attendance history."""
+    records = (
+        AttendanceRecord.query.options(
+            joinedload(AttendanceRecord.session),
+            joinedload(AttendanceRecord.student_identity).joinedload(CodexStudentID.user),
+        )
+        .join(AttendanceSession)
+        .filter(AttendanceRecord.student_identity.has(user_id=current_user().id))
+        .order_by(AttendanceRecord.scanned_at.desc())
+        .all()
+    )
+    return success_response(
+        "Attendance history retrieved",
+        {"attendance": [record.to_dict(include_student=True, include_scanner=True) for record in records]},
+    )
+
+
+@students_bp.get("/student/activity")
+@student_required
+def student_activity():
+    """Get activity profile with attendance statistics and history."""
+    student = current_user()
+    
+    # Get Codex ID
+    student_id = CodexStudentID.query.filter_by(user_id=student.id).first()
+    
+    # Get attendance records
+    records = (
+        AttendanceRecord.query.options(
+            joinedload(AttendanceRecord.session),
+            joinedload(AttendanceRecord.student_identity).joinedload(CodexStudentID.user),
+        )
+        .join(AttendanceSession)
+        .filter(AttendanceRecord.student_identity.has(user_id=student.id))
+        .order_by(AttendanceRecord.scanned_at.desc())
+        .all()
+    )
+    
+    # Get enrollments for learning progress
+    enrollments = (
+        Enrollment.query.options(
+            joinedload(Enrollment.course).options(
+                joinedload(Course.instructor),
+                joinedload(Course.category),
+            ),
+        )
+        .filter_by(student_id=student.id)
+        .order_by(Enrollment.enrolled_at.desc())
+        .all()
+    )
+    
+    # Calculate learning progress
+    progress_values = [
+        calculate_course_progress(student.id, enrollment.course_id)["progress_percentage"]
+        for enrollment in enrollments
+    ]
+    overall_progress = int(round(sum(progress_values) / len(progress_values))) if progress_values else 0
+    
+    return success_response(
+        "Activity profile retrieved",
+        {
+            "student": student.to_dict(),
+            "codex_id": student_id.to_dict() if student_id else None,
+            "attendance": {
+                "total_events": len(records),
+                "recent_records": [record.to_dict(include_student=True) for record in records[:10]],
+            },
+            "learning": {
+                "enrolled_courses": len(enrollments),
+                "overall_progress": overall_progress,
+            },
         },
     )

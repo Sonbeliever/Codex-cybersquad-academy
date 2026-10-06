@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sqlalchemy import func
+
 from app.extensions import db
+from app.models.enrollment import Enrollment
 from app.models.user import utc_now
 
 
@@ -55,6 +58,12 @@ class Course(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    payments = db.relationship(
+        "Payment",
+        back_populates="course",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         db.CheckConstraint("price >= 0", name="ck_courses_price_non_negative"),
@@ -73,7 +82,19 @@ class Course(db.Model):
         ),
     )
 
-    def to_public_dict(self, include_curriculum: bool = False) -> dict:
+    def active_enrollment_count(self) -> int:
+        """Aggregate count of active/completed enrollments (no student identities)."""
+        return (
+            db.session.query(func.count(Enrollment.id))
+            .filter(
+                Enrollment.course_id == self.id,
+                Enrollment.status.in_(("active", "completed")),
+            )
+            .scalar()
+            or 0
+        )
+
+    def to_public_dict(self, include_curriculum: bool = False, enrolled_count: int | None = None) -> dict:
         data = {
             "id": self.id,
             "title": self.title,
@@ -86,6 +107,7 @@ class Course(db.Model):
             "thumbnail": self.thumbnail,
             "duration": self.duration,
             "status": self.status,
+            "enrolled_count": enrolled_count if enrolled_count is not None else self.active_enrollment_count(),
             "rating": {"average": 0, "count": 0},
             "category": self.category.to_dict() if self.category else None,
             "instructor": self.instructor.to_public_dict() if self.instructor else None,

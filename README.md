@@ -342,3 +342,5 @@ Included prototype flows:
 - Admin dashboard mockup.
 
 The production frontend should call the Flask REST APIs as backend phases are completed.
+#   C o d e x - c y b e r s q u a d - a c a d e m y  
+ 

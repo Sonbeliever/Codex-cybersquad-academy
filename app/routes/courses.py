@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from flask import Blueprint, request
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from app.extensions import db
-from app.models import Category, Course
+from app.models import Category, Course, Enrollment
 from app.responses import error_response, success_response
 from app.routes.helpers import pagination_args, pagination_payload
 
@@ -32,14 +32,35 @@ def category_courses(category_id: int):
         .order_by(Course.created_at.desc())
         .paginate(page=page, per_page=per_page, error_out=False)
     )
+    counts = _enrolled_counts(list(pagination.items))
     return success_response(
         "Category courses retrieved",
         {
             "category": category.to_dict(),
-            "courses": [course.to_public_dict() for course in pagination.items],
+            "courses": [
+                course.to_public_dict(enrolled_count=counts.get(course.id, 0))
+                for course in pagination.items
+            ],
             "pagination": pagination_payload(pagination),
         },
     )
+
+
+def _enrolled_counts(courses: list[Course]) -> dict[int, int]:
+    """Batch aggregate enrollment counts to avoid N+1 queries in listings."""
+    ids = [course.id for course in courses]
+    if not ids:
+        return {}
+    rows = (
+        db.session.query(Enrollment.course_id, func.count(Enrollment.id))
+        .filter(
+            Enrollment.course_id.in_(ids),
+            Enrollment.status.in_(("active", "completed")),
+        )
+        .group_by(Enrollment.course_id)
+        .all()
+    )
+    return {course_id: count for course_id, count in rows}
 
 
 @courses_bp.get("/courses")
@@ -81,10 +102,14 @@ def courses_index():
     pagination = query.order_by(Course.created_at.desc()).paginate(
         page=page, per_page=per_page, error_out=False
     )
+    counts = _enrolled_counts(list(pagination.items))
     return success_response(
         "Courses retrieved",
         {
-            "courses": [course.to_public_dict() for course in pagination.items],
+            "courses": [
+                course.to_public_dict(enrolled_count=counts.get(course.id, 0))
+                for course in pagination.items
+            ],
             "pagination": pagination_payload(pagination),
         },
     )

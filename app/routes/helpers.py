@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qs, urlparse
 
 from flask import request
 
@@ -12,6 +13,13 @@ from app.security import current_user
 
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+YOUTUBE_VIDEO_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+IMAGE_EXT_RE = re.compile(r"\.(avif|bmp|gif|jpe?g|png|svg|webp)(?:$|\?)", re.IGNORECASE)
+DANGEROUS_SCHEMES = {"javascript", "data", "vbscript", "file"}
+# Must match courses.thumbnail column width (db.String(500)) so oversized URLs
+# fail validation cleanly instead of raising a database-level error.
+THUMBNAIL_MAX_LENGTH = 500
 
 
 def json_body() -> dict:
@@ -122,6 +130,11 @@ def validate_course_payload(payload: dict, partial: bool = False) -> tuple[dict,
         if optional in payload:
             data[optional] = str(payload.get(optional) or "").strip() or None
 
+    if "thumbnail" in data and data["thumbnail"]:
+        thumbnail_error = validate_thumbnail_url(data["thumbnail"])
+        if thumbnail_error:
+            errors["thumbnail"] = thumbnail_error
+
     if "price" in payload or not partial:
         data["price"] = parse_non_negative_decimal(payload.get("price", 0), "price", errors)
     if "duration" in payload or not partial:
@@ -130,6 +143,99 @@ def validate_course_payload(payload: dict, partial: bool = False) -> tuple[dict,
         )
 
     return data, errors
+
+
+def _parsed_http_url(value: str):
+    try:
+        parsed = urlparse(value.strip())
+    except ValueError:
+        return None
+    scheme = (parsed.scheme or "").lower()
+    if scheme in DANGEROUS_SCHEMES:
+        return None
+    if scheme not in {"http", "https"}:
+        return None
+    if not parsed.netloc:
+        return None
+    return parsed
+
+
+def validate_thumbnail_url(value: str) -> str | None:
+    if len(value) > THUMBNAIL_MAX_LENGTH:
+        return f"Thumbnail URL must be {THUMBNAIL_MAX_LENGTH} characters or less."
+
+    parsed = _parsed_http_url(value)
+    if not parsed:
+        return "Thumbnail must be an http(s) image URL."
+
+    host = parsed.netloc.lower()
+    path = parsed.path or ""
+    if host in YOUTUBE_HOSTS or host.endswith(".youtube.com"):
+        if "img.youtube.com" in host and "/vi/" in path:
+            return None
+        return (
+            "Thumbnail must be an image URL, not a YouTube watch/embed link. "
+            "Use an image such as https://img.youtube.com/vi/VIDEO_ID/hqdefault.jpg "
+            "or another image URL."
+        )
+    if IMAGE_EXT_RE.search(path) or "img.youtube.com" in host:
+        return None
+    # Allow generic https image hosts without extension (CDNs), but reject obvious video pages.
+    if any(token in path.lower() for token in ("/watch", "/embed/", "/shorts/")):
+        return "Thumbnail must be an image URL, not a video page URL."
+    return None
+
+
+def extract_youtube_id(value: str) -> str | None:
+    parsed = _parsed_http_url(value)
+    if not parsed:
+        return None
+    host = parsed.netloc.lower()
+    path = parsed.path or ""
+    if host in {"youtu.be", "www.youtu.be"}:
+        candidate = path.strip("/").split("/")[0]
+        return candidate if YOUTUBE_VIDEO_RE.fullmatch(candidate) else None
+    if host in YOUTUBE_HOSTS or host.endswith(".youtube.com"):
+        if path.startswith("/embed/") or path.startswith("/shorts/"):
+            candidate = path.strip("/").split("/")[1] if "/" in path.strip("/") else ""
+            return candidate if YOUTUBE_VIDEO_RE.fullmatch(candidate) else None
+        query = parse_qs(parsed.query)
+        candidate = (query.get("v") or [None])[0]
+        return candidate if candidate and YOUTUBE_VIDEO_RE.fullmatch(candidate) else None
+    return None
+
+
+def normalize_lesson_video_url(value: str | None) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None, None
+    parsed = _parsed_http_url(cleaned)
+    if not parsed:
+        return None, "Video URL must be a safe http(s) link."
+
+    youtube_id = extract_youtube_id(cleaned)
+    if youtube_id:
+        return f"https://www.youtube.com/watch?v={youtube_id}", None
+
+    host = parsed.netloc.lower()
+    if host in YOUTUBE_HOSTS or host.endswith(".youtube.com"):
+        return None, "Provide a valid YouTube watch, share, or embed URL."
+
+    # Allow direct media URLs for non-YouTube lesson videos.
+    if IMAGE_EXT_RE.search(parsed.path or ""):
+        return None, "Lesson video_url must be a video source, not an image thumbnail URL."
+    return cleaned, None
+
+
+def queue_published_course_for_review(course: Course) -> bool:
+    """Move a live course back to pending when the instructor changes it."""
+    if course.status in {"published", "approved"}:
+        course.status = "pending"
+        course.admin_note = None
+        return True
+    return False
 
 
 def instructor_is_approved() -> bool:

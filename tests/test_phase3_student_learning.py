@@ -32,6 +32,8 @@ def published_course_with_lessons():
 def test_student_can_enroll_in_published_course(app, client):
     student = create_user("Student", "student@example.com")
     course, _, _ = published_course_with_lessons()
+    course.price = 0
+    db.session.commit()
 
     response = client.post(
         "/api/enrollments",
@@ -42,6 +44,19 @@ def test_student_can_enroll_in_published_course(app, client):
     enrollment = response.get_json()["data"]["enrollment"]
     assert enrollment["course_id"] == course.id
     assert enrollment["status"] == "active"
+
+
+def test_student_cannot_enroll_in_paid_course_without_payment(app, client):
+    student = create_user("Student", "student@example.com")
+    course, _, _ = published_course_with_lessons()
+
+    response = client.post(
+        "/api/enrollments",
+        json={"course_id": course.id},
+        headers=auth_header(student),
+    )
+    assert response.status_code == 402
+    assert response.get_json()["error"] == "PAYMENT_REQUIRED"
 
 
 def test_student_cannot_enroll_in_unpublished_course(app, client):

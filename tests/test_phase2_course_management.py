@@ -222,6 +222,10 @@ def test_instructor_application_and_admin_approval(app, client):
     student = create_user("Future Instructor", "future@example.com")
     admin = create_user("Admin", "admin@example.com", role="admin")
 
+    empty = client.get("/api/instructor/application", headers=auth_header(student))
+    assert empty.status_code == 200
+    assert empty.get_json()["data"]["application"] is None
+
     applied = client.post(
         "/api/instructor/apply",
         json={
@@ -244,6 +248,161 @@ def test_instructor_application_and_admin_approval(app, client):
     )
     assert approved.status_code == 200
     assert approved.get_json()["data"]["application"]["user"]["role"] == "instructor"
+
+
+def test_approved_instructor_without_application_row_gets_null_application(app, client):
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    response = client.get("/api/instructor/application", headers=auth_header(instructor))
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["data"]["application"] is None
+
+
+def test_editing_published_course_queues_admin_review(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    course = create_course(instructor, category, status="published")
+
+    updated = client.put(
+        f"/api/instructor/courses/{course.id}",
+        json={
+            "description": "Updated practical description for enrolled learners.",
+            "thumbnail": "https://cdn.example.com/course-thumbnail.jpg",
+        },
+        headers=auth_header(instructor),
+    )
+    assert updated.status_code == 200
+    body = updated.get_json()
+    assert body["data"]["course"]["status"] == "pending"
+    assert "re-review" in body["message"]
+
+
+def test_thumbnail_url_at_max_length_is_accepted_on_create(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+
+    # 500 characters total, well-formed https image URL padded with query params.
+    base = "https://cdn.example.com/course-thumbnail.jpg?ref="
+    thumbnail = base + ("a" * (500 - len(base)))
+    assert len(thumbnail) == 500
+
+    response = client.post(
+        "/api/instructor/courses",
+        json={**course_payload(category.id), "thumbnail": thumbnail},
+        headers=auth_header(instructor),
+    )
+    assert response.status_code == 201
+    assert response.get_json()["data"]["course"]["thumbnail"] == thumbnail
+
+
+def test_thumbnail_url_over_max_length_is_rejected_on_create(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+
+    base = "https://www.bing.com/images/search?q=course&form=HDRSC2&first=1&extra="
+    thumbnail = base + ("a" * (501 - len(base)))
+    assert len(thumbnail) == 501
+
+    response = client.post(
+        "/api/instructor/courses",
+        json={**course_payload(category.id), "thumbnail": thumbnail},
+        headers=auth_header(instructor),
+    )
+    assert response.status_code == 422
+    body = response.get_json()
+    assert body["error"] == "VALIDATION_ERROR"
+    assert body["details"]["thumbnail"] == "Thumbnail URL must be 500 characters or less."
+
+    # Ensure no course row was created because of the oversized value.
+    assert Course.query.count() == 0
+
+
+def test_thumbnail_url_over_max_length_is_rejected_on_update(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    course = create_course(instructor, category, status="draft")
+
+    base = "https://www.bing.com/images/search?q=course&form=HDRSC2&first=1&extra="
+    thumbnail = base + ("a" * (501 - len(base)))
+    assert len(thumbnail) == 501
+
+    response = client.put(
+        f"/api/instructor/courses/{course.id}",
+        json={"thumbnail": thumbnail},
+        headers=auth_header(instructor),
+    )
+    assert response.status_code == 422
+    body = response.get_json()
+    assert body["error"] == "VALIDATION_ERROR"
+    assert body["details"]["thumbnail"] == "Thumbnail URL must be 500 characters or less."
+
+    # The course's thumbnail must remain unchanged (no truncation, no partial write).
+    db.session.refresh(course)
+    assert course.thumbnail != thumbnail
+
+
+def test_thumbnail_rejects_youtube_watch_url(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    course = create_course(instructor, category, status="draft")
+
+    response = client.put(
+        f"/api/instructor/courses/{course.id}",
+        json={"thumbnail": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"},
+        headers=auth_header(instructor),
+    )
+    assert response.status_code == 422
+    assert response.get_json()["error"] == "VALIDATION_ERROR"
+    assert "thumbnail" in response.get_json()["details"]
+
+
+def test_lesson_youtube_url_is_normalized(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    course = create_course(instructor, category)
+    module_response = client.post(
+        f"/api/instructor/courses/{course.id}/modules",
+        json={"title": "Videos", "order": 1},
+        headers=auth_header(instructor),
+    )
+    module_id = module_response.get_json()["data"]["module"]["id"]
+
+    lesson_response = client.post(
+        f"/api/instructor/modules/{module_id}/lessons",
+        json={
+            "title": "Intro",
+            "video_url": "https://youtu.be/dQw4w9WgXcQ",
+            "duration": 5,
+            "order": 1,
+        },
+        headers=auth_header(instructor),
+    )
+    assert lesson_response.status_code == 201
+    assert (
+        lesson_response.get_json()["data"]["lesson"]["video_url"]
+        == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    )
+
+
+def test_duplicate_module_order_returns_clear_conflict(app, client):
+    category = create_category()
+    instructor = create_user("Instructor", "inst@example.com", role="instructor")
+    course = create_course(instructor, category)
+    first = client.post(
+        f"/api/instructor/courses/{course.id}/modules",
+        json={"title": "One", "order": 1},
+        headers=auth_header(instructor),
+    )
+    assert first.status_code == 201
+    conflict = client.post(
+        f"/api/instructor/courses/{course.id}/modules",
+        json={"title": "Two", "order": 1},
+        headers=auth_header(instructor),
+    )
+    assert conflict.status_code == 409
+    assert conflict.get_json()["error"] == "MODULE_ORDER_EXISTS"
+    assert "order" in conflict.get_json()["message"].lower()
 
 
 def test_students_cannot_approve_instructors_or_courses(app, client):

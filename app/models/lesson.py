@@ -51,7 +51,17 @@ class Lesson(db.Model):
             "duration": self.duration,
             "order": self.order,
             "is_preview": self.is_preview,
-            "resources": [resource.to_dict() for resource in self.resources],
+            "resources": [
+                resource.to_dict()
+                if self.is_preview
+                else {
+                    "id": resource.id,
+                    "lesson_id": resource.lesson_id,
+                    "name": resource.name,
+                    "file_type": resource.file_type,
+                }
+                for resource in self.resources
+            ],
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -62,6 +72,7 @@ class Lesson(db.Model):
     def to_owner_dict(self) -> dict:
         data = self.to_public_dict()
         data["video_url"] = self.video_url
+        data["resources"] = [resource.to_dict() for resource in self.resources]
         return data
 
 

@@ -7,6 +7,7 @@ from app.routes.courses import courses_bp
 from app.routes.errors import register_error_handlers
 from app.routes.instructors import instructors_bp
 from app.routes.students import students_bp
+from app.routes.payments import payments_bp
 
 
 def create_app(config_object: str | None = None) -> Flask:
@@ -32,6 +33,7 @@ def register_blueprints(app: Flask) -> None:
     app.register_blueprint(instructors_bp)
     app.register_blueprint(admin_bp)
     app.register_blueprint(students_bp)
+    app.register_blueprint(payments_bp)
 
     @app.get("/api/health")
     def health_check():

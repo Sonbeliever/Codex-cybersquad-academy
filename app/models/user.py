@@ -46,9 +46,28 @@ class User(db.Model):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    payments = db.relationship(
+        "Payment",
+        back_populates="student",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     lesson_progress = db.relationship(
         "LessonProgress",
         back_populates="student",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    codex_student_id = db.relationship(
+        "CodexStudentID",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    attendance_sessions = db.relationship(
+        "AttendanceSession",
+        back_populates="creator",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
